@@ -1,11 +1,11 @@
 /********** PIN ASSIGNMENTS **********/
-int ADDR[15] = {23, 25, 27, 29, 31, 33, 35, 37, 39, 41, 43, 45, 47, 49, 51};
-int DATA[8] =  {22, 24, 26, 28, 30, 32, 34, 36};
-int CE = 40;
-int OE = 42;
-int WE = 44;
+int ADDR[15] = {49, 48, 47, 46, 45, 44, 43, 42, 37, 36, 35, 34, 33, 32, 31};
+int DATA[8] =  {53, 52, 51, 50, 10, 11, 12, 13};
+int CE = 22;
+int OE = 23;
+int WE = 24;
 
-int TRIGGER = 46;
+int TRIGGER = 25;
 
 /********** HELPERS **********/
 
@@ -21,10 +21,24 @@ void _assertPins(int* pins, int width, uint16_t value) {
   }
 }
 
+/*
 #define _assertAddr(value) (assertPins(ADDR, 15, (value)));
 #define _assertData(value) (assertPins(DATA, 8, (value)));
+*/
 
+void _assertAddr(uint16_t value) {
+  PORTL = (uint8_t) (value & 0x00FF);
+  PORTC = (uint8_t) ((value >> 8) & 0x00FF);
+  /*
+  char buffer[1024];
+  sprintf(buffer, "%d -> %x %x / %x %x\r\n", value, value & 0x00FF, (value >> 8) & 0x00FF, PINL, PINC);
+  Serial.println(buffer);
+  */
+}
 
+void _assertData(uint8_t data) {
+  PORTB = data;
+}
 
 
 uint16_t _readPins(int* pins, int width) {
@@ -41,8 +55,10 @@ void WaitForWriteCycle(uint16_t addr, uint8_t expected) {
     do {
       ++tries;
       value = ReadByte(addr);
+      Serial.println(value);
+      delay(100);
       
-    } while (value != expected);
+    } while (value != expected && tries < 50);
 }
 
 void WriteByte(uint16_t addr, uint8_t byte) {
@@ -66,6 +82,7 @@ void WritePage(uint16_t baseAddr, uint8_t* data) {
   digitalWrite(OE, 1);
   digitalWrite(WE, 1);
   digitalWrite(CE, 1);
+  _configIo(ADDR, 15, OUTPUT);
   _configIo(DATA, 8, OUTPUT);
 
 
@@ -74,8 +91,10 @@ void WritePage(uint16_t baseAddr, uint8_t* data) {
     uint16_t addr = baseAddr + i;
     digitalWrite(CE, 1);
     digitalWrite(WE, 1);
-    _assertPins(ADDR, 15, addr);
-    _assertPins(DATA, 8, data[i]);
+    _assertAddr(addr);
+    _assertData(data[i]);
+    //_assertPins(ADDR, 15, addr);
+    //_assertPins(DATA, 8, data[i]);
     digitalWrite(CE, 0);
     digitalWrite(WE, 0);
   }
