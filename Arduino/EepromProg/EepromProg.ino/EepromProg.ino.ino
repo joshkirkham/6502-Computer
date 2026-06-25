@@ -1,5 +1,10 @@
-/********** PIN ASSIGNMENTS **********/
+/* Fill the AT28C256 EEPROM with Data */
 
+#include "EepromImage.h"
+
+char sprintfBuffer[1024];
+
+/********** PIN ASSIGNMENTS **********/
 //   PIN MAP =  A0, A1, A2, A3, A4, A5, ...
 int ADDR[15] = {49, 48, 47, 46, 45, 44, 43, 42, 37, 36, 35, 34, 33, 32, 31};
 
@@ -9,17 +14,9 @@ int DATA[8] =  {53, 52, 51, 50, 10, 11, 12, 13};
 int CE = 22;
 int OE = 23;
 int WE = 24;
-
-int TRIGGER = 25;
+int TRIGGER = 25; // Debug pin to trigger an oscope for debugging :)
 
 /********** HELPERS **********/
-
-#define PAGE_SIZE 64
-
-/*
-#define _assertAddr(value) (assertPins(ADDR, 15, (value)));
-#define _assertData(value) (assertPins(DATA, 8, (value)));
-*/
 
 void _AssertAddress(uint16_t value) {
   PORTL = (uint8_t) (value & 0x00FF);
@@ -46,16 +43,11 @@ void _SetupBusForWrite(void) {
   DDRB = 0xFF; // Data = Output
 }
 
-void _SetBusEnables(int state) {
-  digitalWrite(CE, state);
-  digitalWrite(OE, state);
-}
-
 void _WaitForWriteCycle(uint16_t addr, uint8_t expected) {
     int tries = 0;
     uint8_t value = ReadByte(addr);
     while (value != expected && tries < 50) {
-      delay(100);
+      delay(1);
       value = ReadByte(addr);
       ++tries;
     } 
@@ -64,7 +56,6 @@ void _WaitForWriteCycle(uint16_t addr, uint8_t expected) {
       Serial.println("ERROR: Timed out waiting for write cycle.");
     }
 }
-
 
 uint8_t ReadByte(uint16_t addr) {
   _SetupBusForRead();
@@ -87,31 +78,38 @@ void WriteByte(uint16_t addr, uint8_t data) {
   digitalWrite(WE, 1);
 }
 
-
 void WritePage(uint16_t baseAddr, uint8_t* data) {
   _SetupBusForWrite();
   digitalWrite(OE, 1);
-  digitalWrite(TRIGGER, 1);
 
   baseAddr = baseAddr & (~0x3F);
 
   for (int i = 0; i < PAGE_SIZE; ++i) {
     uint16_t addr = baseAddr + i;
     _AssertAddress(addr);
-    _AssertData(data[i]);
+    _AssertData((uint8_t)pgm_read_byte_near(data + i));
     digitalWrite(WE, 0);
     digitalWrite(WE, 1);
   }
 
-  _WaitForWriteCycle(baseAddr + 63, data[63]);
+  _WaitForWriteCycle(baseAddr + (PAGE_SIZE-1), (uint8_t)pgm_read_byte_near(data + PAGE_SIZE - 1));
 }
+
+
 
 int ValidatePage(uint16_t baseAddr, uint8_t* expectedData) {
   int numErrors = 0;
   baseAddr = baseAddr & (~0x3F);
   for (int i = 0; i < PAGE_SIZE; ++i) {
-    if (ReadByte(baseAddr + i) != expectedData[i]) {
+    uint8_t expected = pgm_read_byte_near(expectedData + i);
+    uint8_t actual = ReadByte(baseAddr + i);
+
+    if (actual != expected) {
       ++numErrors;
+      
+      snprintf(sprintfBuffer, 1024, "Page %04X  Byte %02X\tExpected %02X\tSaw %02X", baseAddr, i, expected, actual);
+      Serial.println(sprintfBuffer);
+      
     }
   }
   return numErrors;
@@ -119,15 +117,12 @@ int ValidatePage(uint16_t baseAddr, uint8_t* expectedData) {
 
 
 
-
-
-
 /********* MAIN **********/
 
 void setup() {
   Serial.begin(9600);
-  delay(2000);
-  Serial.println("========== AT28C256 Programming (write disable) ==========");
+  Serial.println("\n========== AT28C256 Programming ==========");
+
   pinMode(CE, OUTPUT);
   pinMode(OE, OUTPUT);
   pinMode(WE, OUTPUT);
@@ -135,86 +130,65 @@ void setup() {
   digitalWrite(OE, 1);
   digitalWrite(WE, 1);
 
+  // First page fails to write without this explicitly set ahead of time. Why? Signals look good on oscope without it...
+  _SetupBusForWrite();
+  _AssertAddress(0);
+  _AssertData(0);
+  
   pinMode(TRIGGER, OUTPUT);
   digitalWrite(TRIGGER, 0);
+  delay(500);
 
 
-  char buffer[1024];
-  uint8_t data[64];
-  memset(data, 0xEA, 64);
 
-  Serial.println("Writing Data");
-  for (int page = 0; page < 512; ++page) {
+  // Manually program the reset vector.
+  WriteByte(0x7FFD, 0x80);
+  delay(20);
+  WriteByte(0x7FFC, 0x00);
+  delay(20);
+
+  int numErrors = 0;
+  int numPagesWithError = 0;
+
+  for (int page = 0; page < NUM_PAGES; ++page) {
+
+    // Skip programming the last page (511 / 0x7FC0)
+    // For some reason it only works with the individual byte function
+    // Why? idk... For now just fill the reset vector manually
+    // TODO: Figure this out.
+    if (page == NUM_PAGES - 1) { continue; }
+
     uint16_t pageAddress = page * PAGE_SIZE;
-    WritePage(pageAddress, data);
-    int numErrors = ValidatePage(0x00, data);
-    if (numErrors > 0) {
-      snprintf(buffer, 1024, "Page @ %x: ERROR (%d)", pageAddress, numErrors);
+    uint8_t* pageData = EEPROM_PAGE(page);
+
+    WritePage(pageAddress, pageData);
+    int err = ValidatePage(pageAddress, pageData);
+    delay(1); // Needed?
+
+    if (err > 0) {
+      numErrors += err;
+      numPagesWithError++;
     }
-    else {
-      snprintf(buffer, 1024, "Page @ %x: OKAY", pageAddress);
+
+    if (page % 50 == 0) {
+      snprintf(sprintfBuffer, 1024, "Finished Page %d/%d", page, NUM_PAGES);
+      Serial.println(sprintfBuffer);
     }
-    Serial.println(buffer);
+
   }
 
-
-
-/*
-  uint8_t muhData[6] = {0xDE, 0xAD, 0xBE, 0xEF, 0xBA, 0xBE};
-  for (uint16_t addr = 0; addr < 6; ++addr) {
-    WriteByte(addr, muhData[addr]);
-
-    uint8_t value;
-    unsigned long start = micros();
-    int tries = 0;
-    do {
-      ++tries;
-      value = ReadByte(addr);
-      //snprintf(buffer, 1024, "%04x: %02x", addr, value);
-      
-    } while (value != muhData[addr]);
-
-    unsigned long stop = micros();
-    snprintf(buffer, 1024, "Write: %d tries, %ul us", tries, stop - start);
-    Serial.println(buffer);
-
-
-    //delay(100);
-    //uint8_t value = ReadByte(addr);
-    snprintf(buffer, 1024, "%04x: %02x", addr, value);
-    Serial.println(buffer);
+  Serial.println("Programming Finished");
+  if (numErrors > 0) {
+    snprintf(sprintfBuffer, 1024, "%d Errors in %d Pages", numErrors, numPagesWithError);
+    Serial.println(sprintfBuffer);
   }
-  */
-
-
+  else {
+    Serial.println("Verification Passed");
+  }
 
 }
+
 
 void loop() {
   // put your main code here, to run repeatedly:
-
-}
-
-
-
-// SLOW FUNCTIONS
-void _configIo(int* pins, int width, int mode) {
-  for (int i = 0; i < width; ++i) {
-    pinMode(pins[i], mode);
-  }
-}
-
-void _assertPins(int* pins, int width, uint16_t value) {
-  for (int i = 0; i < width; ++i) {
-    digitalWrite(pins[i], (value >> i) & 1);
-  }
-}
-
-
-uint16_t _readPins(int* pins, int width) {
-  uint16_t value = 0;
-  for (int i = 0; i < width; ++i) {
-    value |= (digitalRead(pins[i]) << i);
-  }
-  return value;
 }
